@@ -43,6 +43,24 @@ Todas están en la carpeta `capturas/` y se organizan según el programa `.asm` 
 
 ![Ejecución de MULTI_ST.asm](capturas/p1_c4_ejecucion.png)
 
+### Parte 2
+
+#### `parte2/ISR_KB.asm` — P2-C1
+
+![Ejecución de ISR_KB.asm](capturas/p2_c1_ejecucion.png)
+
+#### `parte2/MASK_KB.asm` — P2-C2
+
+![Ejecución de MASK_KB.asm](capturas/p2_c2_ejecucion.png)
+
+#### `parte2/ISR_CHAIN.asm` — P2-C3
+
+![Ejecución de ISR_CHAIN.asm](capturas/p2_c3_ejecucion.png)
+
+#### `parte2/SR_TIME.asm` — P2-C4
+
+![Ejecución de ISR_TIME.asm](capturas/p2_c4_ejecucion.png)
+
 # Parte 1: Acceso directo a puertos de E/S
 
 ### LPT1.ASM: escritura al puerto paralelo (Checkpoint 3)
@@ -71,3 +89,21 @@ El OR de `MULTI_ST.ASM` permite esperar el primero de dos eventos con un solo bu
 Después de salir del bucle es necesario examinar BL y BH por separado porque el OR descarta la información de cuál bandera causó la salida: un resultado distinto de cero solo indica que "alguno" está listo, no cuál, ni si son ambos. Sin esa verificación posterior, el programa no sabría a qué dispositivo atender, o atendería a uno que no está listo.
 
 Si en lugar de OR se usara AND, el programa esperaría que ambas condiciones se cumplan simultáneamente. Esto sería apropiado para una sincronización tipo rendezvous: por ejemplo, no enviar un dato a la impresora hasta que el usuario haya presionado una tecla Y la impresora esté lista. El OR, en cambio, solo necesita que ocurra el primero de los dos eventos.
+
+# Parte 2: ISR personalizado y programación del PIC 8259A
+
+## Decisión técnica 3: ¿En qué punto del ISR debe ir el EOI?
+
+Si el EOI se envía después de imprimir (como en `ISR_KB.ASM`) y la impresión por INT 21h tarda varios milisegundos, el PIC 8259A mantiene IRQ1 marcada como "en servicio" durante todo ese lapso y no puede despachar interrupciones de menor prioridad (IRQ2 a IRQ7, por ejemplo LPT1) que lleguen mientras tanto. Su latencia aumenta sin necesidad, porque el trabajo con el hardware ya terminó cuando se leyó el puerto 60h.
+
+Como el ISR no ejecuta `STI`, la CPU mantiene IF=0 hasta el `IRET`. Por eso enviar el EOI temprano no expone el ISR a la reentrada de IRQ1: la CPU no aceptaría ninguna interrupción enmascarable hasta el `IRET`. Hay que distinguir dos cosas: que el PIC pueda despachar otras IRQ pendientes (lo que habilita el EOI) y que la CPU las acepte (lo que depende de IF). El beneficio del EOI temprano aquí es que el PIC queda libre para entregar la siguiente IRQ en cuanto la CPU rehabilite IF al retornar, en lugar de esperar al final. Enviarlo demasiado temprano solo sería peligroso si además se ejecutara `STI` antes de terminar de leer el dispositivo, pues IRQ1 podría reentrar. Enviarlo demasiado tarde, o nunca, bloquea al PIC.
+
+`ISR_TIME.ASM` envía el EOI inmediatamente después de leer el dispositivo y el contador de ticks, y deja la impresión para después. Esa es la práctica recomendada: enviar el EOI apenas se complete el trabajo estrictamente necesario sobre el hardware y dejar el procesamiento largo para después.
+
+## Decisión técnica 4: ¿Polling o interrupción para el mismo dispositivo?
+
+El polling de `TECL.ASM` es un busy-wait que ocupa el 100% del CPU mientras no hay dato. Resulta inaceptable en cualquier programa que deba seguir haciendo trabajo útil mientras espera una tecla: un juego que anima la pantalla, un programa que atiende otro periférico o un planificador cooperativo. Con el ISR de `ISR_KB.ASM`, el programa principal sigue ejecutando sus instrucciones y solo se interrumpe cuando ocurre el evento.
+
+En latencia, el ISR responde más rápido y de forma más predecible: el hardware activa IRQ1 y la CPU salta al handler en cuanto termina la instrucción en curso (con IF=1). El polling, en cambio, solo detecta la tecla cuando el bucle `.poll` vuelve a ejecutar `IN AL, 64h`, de modo que su latencia depende de lo que el programa esté haciendo entre sondeos. Si el sondeo es muy espaciado, se pierde reactividad; si es muy frecuente, se desperdicia CPU.
+
+Para un dispositivo lento y esporádico como el teclado, donde pueden pasar minutos entre eventos, mantener el CPU en un bucle de polling es un desperdicio de ciclos: consume energía, genera calor y no deja tiempo de procesador a otras tareas, solo para esperar un evento rarísimo. El enfoque por interrupciones evita este costo por diseño. El polling queda reservado para esperas muy cortas, donde instalar y desinstalar un ISR no se justifica.
